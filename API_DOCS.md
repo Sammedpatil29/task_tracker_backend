@@ -70,8 +70,10 @@ Authorization: Bearer <your_jwt_token>
 | `POST` | `/auth/register` | No | Register a new user and obtain JWT token |
 | `POST` | `/auth/login` | No | Authenticate user and obtain JWT token |
 | `GET` | `/api/dashboard` | Yes | Retrieve user profile, all tasks, and completion history |
+| `PUT` | `/api/user/profile` | Yes | Update user profile name and emoji (email is protected) |
 | `POST` | `/api/tasks` | Yes | Create a new task |
 | `PATCH`| `/api/tasks/:id/toggle` | Yes | Enable or disable a task |
+| `DELETE`| `/api/tasks/:id` | Yes | Delete a task and its completion records |
 | `POST` | `/api/completions` | Yes | Record or toggle task completion status for a date |
 
 ---
