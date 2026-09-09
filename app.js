@@ -3,7 +3,7 @@ import cors from 'cors';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
-import { Sequelize, DataTypes } from 'sequelize';
+import { Sequelize, DataTypes, Op } from 'sequelize';
 import 'dotenv/config';
 import { sendOtpEmail, sendPasswordResetOtpEmail } from './emailService.js';
 
@@ -180,6 +180,67 @@ const Completion = sequelize.define('Completion', {
   ]
 });
 
+const Achievement = sequelize.define('Achievement', {
+  id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+  badgeKey: { type: DataTypes.STRING(60), allowNull: false },
+  unlockedAt: { type: DataTypes.DATE, defaultValue: DataTypes.NOW }
+}, {
+  indexes: [
+    { unique: true, fields: ['UserId', 'badgeKey'] }
+  ]
+});
+
+const ProductivityCategory = sequelize.define('ProductivityCategory', {
+  id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+  name: { type: DataTypes.STRING(80), allowNull: false },
+  targetHours: { type: DataTypes.FLOAT, allowNull: false, defaultValue: 2.0 },
+  emoji: { type: DataTypes.STRING(20), defaultValue: '⚡' },
+  color: { type: DataTypes.STRING(20), defaultValue: '#10b981' }
+});
+
+const ActivityLog = sequelize.define('ActivityLog', {
+  id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+  title: { type: DataTypes.STRING(120), allowNull: false },
+  date: { type: DataTypes.DATEONLY, allowNull: false },
+  startTime: { type: DataTypes.STRING(10), allowNull: false }, // "HH:MM"
+  endTime: { type: DataTypes.STRING(10), allowNull: false },   // "HH:MM"
+  durationMinutes: { type: DataTypes.INTEGER, allowNull: false },
+  ProductivityCategoryId: { type: DataTypes.INTEGER, allowNull: true }
+}, {
+  indexes: [
+    { fields: ['UserId', 'date'] }
+  ]
+});
+
+// Diet Goal - one per user, stores daily calorie + macro targets
+const DietGoal = sequelize.define('DietGoal', {
+  id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+  dailyCalories: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 2000 },
+  proteinG: { type: DataTypes.FLOAT, allowNull: false, defaultValue: 150 },  // grams
+  carbsG: { type: DataTypes.FLOAT, allowNull: false, defaultValue: 200 },    // grams
+  fatG: { type: DataTypes.FLOAT, allowNull: false, defaultValue: 65 },       // grams
+  fiberG: { type: DataTypes.FLOAT, allowNull: true, defaultValue: 30 },      // grams
+  waterMl: { type: DataTypes.FLOAT, allowNull: true, defaultValue: 2500 }    // ml
+});
+
+// Meal Log - daily food entries with calorie and macro breakdown
+const MealLog = sequelize.define('MealLog', {
+  id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+  name: { type: DataTypes.STRING(150), allowNull: false },  // food/meal name
+  date: { type: DataTypes.DATEONLY, allowNull: false },
+  mealType: { type: DataTypes.STRING(30), allowNull: false, defaultValue: 'Meal' }, // Breakfast, Lunch, Dinner, Snack
+  calories: { type: DataTypes.FLOAT, allowNull: false, defaultValue: 0 },
+  proteinG: { type: DataTypes.FLOAT, allowNull: true, defaultValue: 0 },
+  carbsG: { type: DataTypes.FLOAT, allowNull: true, defaultValue: 0 },
+  fatG: { type: DataTypes.FLOAT, allowNull: true, defaultValue: 0 },
+  fiberG: { type: DataTypes.FLOAT, allowNull: true, defaultValue: 0 },
+  notes: { type: DataTypes.STRING(300), allowNull: true }
+}, {
+  indexes: [
+    { fields: ['UserId', 'date'] }
+  ]
+});
+
 /* =========================================================================
    6. RELATIONS
 ========================================================================= */
@@ -192,6 +253,38 @@ Completion.belongsTo(User);
 
 Task.hasMany(Completion, { onDelete: 'CASCADE' });
 Completion.belongsTo(Task);
+
+User.hasMany(Achievement, { onDelete: 'CASCADE' });
+Achievement.belongsTo(User);
+
+User.hasMany(ProductivityCategory, { foreignKey: 'UserId', onDelete: 'CASCADE' });
+ProductivityCategory.belongsTo(User, { foreignKey: 'UserId' });
+
+User.hasMany(ActivityLog, { foreignKey: 'UserId', onDelete: 'CASCADE' });
+ActivityLog.belongsTo(User, { foreignKey: 'UserId' });
+
+ProductivityCategory.hasMany(ActivityLog, { foreignKey: 'ProductivityCategoryId', onDelete: 'SET NULL' });
+ActivityLog.belongsTo(ProductivityCategory, { foreignKey: 'ProductivityCategoryId' });
+
+User.hasOne(DietGoal, { foreignKey: 'UserId', onDelete: 'CASCADE' });
+DietGoal.belongsTo(User, { foreignKey: 'UserId' });
+
+User.hasMany(MealLog, { foreignKey: 'UserId', onDelete: 'CASCADE' });
+MealLog.belongsTo(User, { foreignKey: 'UserId' });
+
+// Water Log - daily water intake in ml
+const WaterLog = sequelize.define('WaterLog', {
+  id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+  date: { type: DataTypes.DATEONLY, allowNull: false },
+  amountMl: { type: DataTypes.FLOAT, allowNull: false, defaultValue: 0 }
+}, {
+  indexes: [
+    { unique: true, fields: ['UserId', 'date'] }
+  ]
+});
+
+User.hasMany(WaterLog, { foreignKey: 'UserId', onDelete: 'CASCADE' });
+WaterLog.belongsTo(User, { foreignKey: 'UserId' });
 
 /* =========================================================================
    7. SECURE AUTHENTICATION MIDDLEWARE
@@ -644,6 +737,62 @@ app.get('/api/dashboard', auth, async (req, res) => {
       where: { UserId: user.id }
     });
 
+    // Evaluate & Sync Unlocked Achievements to Database
+    const completedList = completions.filter(c => c.completed);
+    const activeTasks = tasks.filter(t => t.enabled !== false);
+
+    const dateMap = new Map();
+    for (const c of completedList) {
+      if (!dateMap.has(c.date)) dateMap.set(c.date, new Set());
+      dateMap.get(c.date).add(c.TaskId);
+    }
+
+    let maxStreak = 0;
+    let curStreak = 0;
+    const today = new Date();
+    for (let i = 180; i >= 0; i--) {
+      const d = new Date(today);
+      d.setDate(d.getDate() - i);
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      const dStr = `${y}-${m}-${day}`;
+      if (dateMap.has(dStr)) {
+        curStreak++;
+        if (curStreak > maxStreak) maxStreak = curStreak;
+      } else {
+        curStreak = 0;
+      }
+    }
+
+    const eligibleBadges = [];
+    if (completedList.length >= 1) eligibleBadges.push('first_win');
+    if (maxStreak >= 3) eligibleBadges.push('streak_3');
+    if (maxStreak >= 7) eligibleBadges.push('streak_7');
+    if (completedList.length >= 50) eligibleBadges.push('centurion');
+
+    if (activeTasks.length > 0) {
+      for (const [_, set] of dateMap.entries()) {
+        if (set.size >= activeTasks.length) {
+          eligibleBadges.push('perfect_day');
+          break;
+        }
+      }
+    }
+
+    // Persist any newly eligible achievements
+    for (const badgeKey of eligibleBadges) {
+      await Achievement.findOrCreate({
+        where: { UserId: user.id, badgeKey },
+        defaults: { unlockedAt: new Date() }
+      });
+    }
+
+    const achievements = await Achievement.findAll({
+      where: { UserId: user.id },
+      attributes: ['badgeKey', 'unlockedAt']
+    });
+
     res.json({
       user: {
         id: user.id,
@@ -655,6 +804,10 @@ app.get('/api/dashboard', auth, async (req, res) => {
         hydrationIntervalMinutes: user.hydrationIntervalMinutes ?? 30
       },
       tasks,
+      achievements: achievements.map(a => ({
+        badgeKey: a.badgeKey,
+        unlockedAt: a.unlockedAt
+      })),
       completions: completions.map(c => ({
         taskId: c.TaskId,
         date: c.date,
@@ -664,6 +817,35 @@ app.get('/api/dashboard', auth, async (req, res) => {
   } catch (err) {
     console.error('Dashboard error:', err);
     res.status(500).json({ error: 'Failed to fetch dashboard data' });
+  }
+});
+
+/* =========================================================================
+   9.1 MANUAL / REAL-TIME ACHIEVEMENT UNLOCK
+========================================================================= */
+
+app.post('/api/achievements/unlock', auth, async (req, res) => {
+  try {
+    let { badgeKey } = req.body;
+    badgeKey = sanitizeText(badgeKey, 60);
+    if (!badgeKey) return res.status(400).json({ error: 'Badge key is required' });
+
+    const [achievement, created] = await Achievement.findOrCreate({
+      where: { UserId: req.user.id, badgeKey },
+      defaults: { unlockedAt: new Date() }
+    });
+
+    res.json({
+      success: true,
+      achievement: {
+        badgeKey: achievement.badgeKey,
+        unlockedAt: achievement.unlockedAt
+      },
+      newlyUnlocked: created
+    });
+  } catch (err) {
+    console.error('Unlock achievement error:', err);
+    res.status(500).json({ error: 'Failed to record achievement' });
   }
 });
 
@@ -876,6 +1058,465 @@ app.post('/api/completions', auth, async (req, res) => {
 });
 
 /* =========================================================================
+   16. PRODUCTIVITY TRACKER APIS (24h Goals & Overlap Protected Time Logs)
+========================================================================= */
+
+// Get user productivity categories
+app.get('/api/productivity/categories', auth, async (req, res) => {
+  try {
+    const categories = await ProductivityCategory.findAll({
+      where: { UserId: req.user.id },
+      order: [['id', 'ASC']]
+    });
+    res.json(categories);
+  } catch (err) {
+    console.error('Get productivity categories error:', err);
+    res.status(500).json({ error: 'Failed to fetch categories' });
+  }
+});
+
+// Bulk Save / Update productivity categories (Validates 24h total allocation)
+app.post('/api/productivity/categories/bulk', auth, async (req, res) => {
+  try {
+    const { categories } = req.body;
+    if (!Array.isArray(categories) || categories.length === 0) {
+      return res.status(400).json({ error: 'At least one category is required' });
+    }
+
+    let totalHours = 0;
+    const sanitizedCategories = [];
+
+    for (const cat of categories) {
+      const name = sanitizeText(cat.name, 60);
+      const targetHours = parseFloat(cat.targetHours);
+      const emoji = sanitizeText(cat.emoji || '⚡', 10);
+      const color = sanitizeText(cat.color || '#10b981', 20);
+
+      if (!name) {
+        return res.status(400).json({ error: 'Category name is required' });
+      }
+      if (isNaN(targetHours) || targetHours <= 0 || targetHours > 24) {
+        return res.status(400).json({ error: `Invalid target hours for '${name}'` });
+      }
+
+      totalHours += targetHours;
+      sanitizedCategories.push({
+        name,
+        targetHours: Math.round(targetHours * 10) / 10,
+        emoji,
+        color,
+        UserId: req.user.id
+      });
+    }
+
+    // Round total to 1 decimal place
+    totalHours = Math.round(totalHours * 10) / 10;
+    if (Math.abs(totalHours - 24.0) > 0.05) {
+      return res.status(400).json({
+        error: `Category goals must total exactly 24.0 hours (current total: ${totalHours} hrs)`
+      });
+    }
+
+    // Remove old categories and recreate clean set
+    await ProductivityCategory.destroy({ where: { UserId: req.user.id } });
+    const created = await ProductivityCategory.bulkCreate(sanitizedCategories);
+
+    res.json({
+      success: true,
+      message: 'Productivity categories and 24h goals saved successfully! 🎯',
+      categories: created
+    });
+  } catch (err) {
+    console.error('Save productivity categories error:', err);
+    res.status(500).json({ error: 'Failed to save productivity categories' });
+  }
+});
+
+// Helper to convert "HH:MM" to minutes from midnight
+const timeToMinutes = (timeStr) => {
+  if (!timeStr || typeof timeStr !== 'string') return -1;
+  const parts = timeStr.trim().split(':');
+  if (parts.length !== 2) return -1;
+  const h = parseInt(parts[0], 10);
+  const m = parseInt(parts[1], 10);
+  if (isNaN(h) || isNaN(m) || h < 0 || h > 23 || m < 0 || m > 59) return -1;
+  return h * 60 + m;
+};
+
+// Get activity logs for a specific date or date range
+app.get('/api/productivity/logs', auth, async (req, res) => {
+  try {
+    const { date, startDate, endDate } = req.query;
+
+    let whereClause = { UserId: req.user.id };
+
+    if (startDate && endDate && isValidDate(startDate) && isValidDate(endDate)) {
+      whereClause.date = { [Op.between]: [startDate, endDate] };
+    } else if (date && isValidDate(date)) {
+      whereClause.date = date;
+    } else {
+      return res.status(400).json({ error: 'Valid date or startDate & endDate range is required (YYYY-MM-DD)' });
+    }
+
+    const logs = await ActivityLog.findAll({
+      where: whereClause,
+      include: [{ model: ProductivityCategory, attributes: ['id', 'name', 'emoji', 'color', 'targetHours'] }],
+      order: [['date', 'ASC'], ['startTime', 'ASC']]
+    });
+
+    res.json(logs);
+  } catch (err) {
+    console.error('Get activity logs error:', err);
+    res.status(500).json({ error: 'Failed to fetch activity logs' });
+  }
+});
+
+// Add activity log with STRICT NON-OVERLAPPING TIME validation
+app.post('/api/productivity/logs', auth, async (req, res) => {
+  try {
+    let { title, date, startTime, endTime, categoryId } = req.body;
+
+    title = sanitizeText(title, 120);
+    if (!title) {
+      return res.status(400).json({ error: 'Activity description/title is required' });
+    }
+
+    if (!isValidDate(date)) {
+      return res.status(400).json({ error: 'Valid date format required (YYYY-MM-DD)' });
+    }
+
+    const startMin = timeToMinutes(startTime);
+    const endMin = timeToMinutes(endTime);
+
+    if (startMin === -1 || endMin === -1) {
+      return res.status(400).json({ error: 'Start time and End time must be in HH:MM format' });
+    }
+
+    if (endMin <= startMin) {
+      return res.status(400).json({ error: 'End time must be after Start time' });
+    }
+
+    const durationMinutes = endMin - startMin;
+
+    // Verify Category exists & belongs to user (or allow null)
+    let category = null;
+    if (categoryId) {
+      category = await ProductivityCategory.findOne({
+        where: { id: categoryId, UserId: req.user.id }
+      });
+      if (!category) {
+        return res.status(400).json({ error: 'Selected category not found' });
+      }
+    }
+
+    // Check for ANY overlapping time slots on this date
+    const existingLogs = await ActivityLog.findAll({
+      where: { UserId: req.user.id, date }
+    });
+
+    for (const existing of existingLogs) {
+      const exStart = timeToMinutes(existing.startTime);
+      const exEnd = timeToMinutes(existing.endTime);
+
+      // Overlap condition: (StartA < EndB) and (EndA > StartB)
+      if (startMin < exEnd && endMin > exStart) {
+        return res.status(409).json({
+          error: `Time conflict: '${startTime} - ${endTime}' overlaps with existing activity '${existing.title}' (${existing.startTime} - ${existing.endTime})`
+        });
+      }
+    }
+
+    const newLog = await ActivityLog.create({
+      title,
+      date,
+      startTime,
+      endTime,
+      durationMinutes,
+      ProductivityCategoryId: category ? category.id : null,
+      UserId: req.user.id
+    });
+
+    const fullLog = await ActivityLog.findByPk(newLog.id, {
+      include: [{ model: ProductivityCategory, attributes: ['id', 'name', 'emoji', 'color', 'targetHours'] }]
+    });
+
+    res.status(201).json({
+      success: true,
+      log: fullLog
+    });
+
+  } catch (err) {
+    console.error('Create activity log error:', err);
+    res.status(500).json({ error: 'Failed to create activity log' });
+  }
+});
+
+// Delete an activity log
+app.delete('/api/productivity/logs/:id', auth, async (req, res) => {
+  try {
+    const logId = parseInt(req.params.id, 10);
+    if (isNaN(logId)) return res.status(400).json({ error: 'Invalid log ID' });
+
+    const log = await ActivityLog.findOne({
+      where: { id: logId, UserId: req.user.id }
+    });
+
+    if (!log) {
+      return res.status(404).json({ error: 'Activity log not found or access denied' });
+    }
+
+    await log.destroy();
+    res.json({ success: true, message: 'Activity log deleted successfully', id: logId });
+  } catch (err) {
+    console.error('Delete activity log error:', err);
+    res.status(500).json({ error: 'Failed to delete activity log' });
+  }
+});
+
+/* =========================================================================
+   16-B. DIET TRACKER API
+========================================================================= */
+
+// GET /api/diet/goal - get user's current diet goal
+app.get('/api/diet/goal', auth, async (req, res) => {
+  try {
+    let goal = await DietGoal.findOne({ where: { UserId: req.user.id } });
+    if (!goal) {
+      // Return default without saving
+      return res.json({
+        dailyCalories: 2000,
+        proteinG: 150,
+        carbsG: 200,
+        fatG: 65,
+        fiberG: 30,
+        waterMl: 2500,
+        isDefault: true
+      });
+    }
+    res.json(goal);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to fetch diet goal' });
+  }
+});
+
+// POST /api/diet/goal - create or update user's diet goal
+app.post('/api/diet/goal', auth, async (req, res) => {
+  try {
+    const { dailyCalories, proteinG, carbsG, fatG, fiberG, waterMl } = req.body;
+
+    if (!dailyCalories || dailyCalories < 500 || dailyCalories > 10000) {
+      return res.status(400).json({ error: 'Daily calories must be between 500 and 10000' });
+    }
+
+    const [goal, created] = await DietGoal.findOrCreate({
+      where: { UserId: req.user.id },
+      defaults: {
+        UserId: req.user.id,
+        dailyCalories: Math.round(dailyCalories),
+        proteinG: parseFloat(proteinG) || 150,
+        carbsG: parseFloat(carbsG) || 200,
+        fatG: parseFloat(fatG) || 65,
+        fiberG: parseFloat(fiberG) || 30,
+        waterMl: parseFloat(waterMl) || 2500
+      }
+    });
+
+    if (!created) {
+      await goal.update({
+        dailyCalories: Math.round(dailyCalories),
+        proteinG: parseFloat(proteinG) || 150,
+        carbsG: parseFloat(carbsG) || 200,
+        fatG: parseFloat(fatG) || 65,
+        fiberG: fiberG != null ? parseFloat(fiberG) : 30,
+        waterMl: waterMl != null ? parseFloat(waterMl) : 2500
+      });
+    }
+
+    res.json(goal);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to save diet goal' });
+  }
+});
+
+// GET /api/diet/logs?date=YYYY-MM-DD - get all meal logs for a specific date
+app.get('/api/diet/logs', auth, async (req, res) => {
+  try {
+    const { date, startDate, endDate } = req.query;
+
+    let whereClause = { UserId: req.user.id };
+
+    if (date) {
+      whereClause.date = date;
+    } else if (startDate && endDate) {
+      whereClause.date = { [Op.between]: [startDate, endDate] };
+    } else {
+      return res.status(400).json({ error: 'date or startDate+endDate required' });
+    }
+
+    const logs = await MealLog.findAll({
+      where: whereClause,
+      order: [['createdAt', 'ASC']]
+    });
+
+    res.json(logs);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to fetch meal logs' });
+  }
+});
+
+// POST /api/diet/logs - add a meal log entry
+app.post('/api/diet/logs', auth, async (req, res) => {
+  try {
+    const { name, date, mealType, calories, proteinG, carbsG, fatG, fiberG, notes } = req.body;
+
+    if (!name || !name.trim()) {
+      return res.status(400).json({ error: 'Meal name is required' });
+    }
+    if (!date) {
+      return res.status(400).json({ error: 'Date is required' });
+    }
+    if (calories == null || parseFloat(calories) < 0) {
+      return res.status(400).json({ error: 'Valid calories are required' });
+    }
+
+    const validMealTypes = ['Breakfast', 'Lunch', 'Dinner', 'Snack', 'Pre-Workout', 'Post-Workout', 'Meal'];
+    const sanitizedMealType = validMealTypes.includes(mealType) ? mealType : 'Meal';
+
+    const log = await MealLog.create({
+      UserId: req.user.id,
+      name: sanitizeText(name, 150),
+      date,
+      mealType: sanitizedMealType,
+      calories: Math.round(parseFloat(calories) * 10) / 10,
+      proteinG: proteinG != null ? Math.round(parseFloat(proteinG) * 10) / 10 : 0,
+      carbsG: carbsG != null ? Math.round(parseFloat(carbsG) * 10) / 10 : 0,
+      fatG: fatG != null ? Math.round(parseFloat(fatG) * 10) / 10 : 0,
+      fiberG: fiberG != null ? Math.round(parseFloat(fiberG) * 10) / 10 : 0,
+      notes: notes ? sanitizeText(notes, 300) : null
+    });
+
+    res.status(201).json(log);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to log meal' });
+  }
+});
+
+// PUT /api/diet/logs/:id - update a meal log entry
+app.put('/api/diet/logs/:id', auth, async (req, res) => {
+  try {
+    const log = await MealLog.findOne({ where: { id: req.params.id, UserId: req.user.id } });
+    if (!log) return res.status(404).json({ error: 'Meal log not found' });
+
+    const { name, mealType, calories, proteinG, carbsG, fatG, fiberG, notes } = req.body;
+    const validMealTypes = ['Breakfast', 'Lunch', 'Dinner', 'Snack', 'Pre-Workout', 'Post-Workout', 'Meal'];
+
+    await log.update({
+      name: name ? sanitizeText(name, 150) : log.name,
+      mealType: validMealTypes.includes(mealType) ? mealType : log.mealType,
+      calories: calories != null ? Math.round(parseFloat(calories) * 10) / 10 : log.calories,
+      proteinG: proteinG != null ? Math.round(parseFloat(proteinG) * 10) / 10 : log.proteinG,
+      carbsG: carbsG != null ? Math.round(parseFloat(carbsG) * 10) / 10 : log.carbsG,
+      fatG: fatG != null ? Math.round(parseFloat(fatG) * 10) / 10 : log.fatG,
+      fiberG: fiberG != null ? Math.round(parseFloat(fiberG) * 10) / 10 : log.fiberG,
+      notes: notes !== undefined ? (notes ? sanitizeText(notes, 300) : null) : log.notes
+    });
+
+    res.json(log);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to update meal log' });
+  }
+});
+
+// DELETE /api/diet/logs/:id - delete a meal log entry
+app.delete('/api/diet/logs/:id', auth, async (req, res) => {
+  try {
+    const log = await MealLog.findOne({ where: { id: req.params.id, UserId: req.user.id } });
+    if (!log) return res.status(404).json({ error: 'Meal log not found' });
+
+    await log.destroy();
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to delete meal log' });
+  }
+});
+
+// GET /api/diet/summary?startDate=X&endDate=Y - range summary for analytics
+app.get('/api/diet/summary', auth, async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+    if (!startDate || !endDate) {
+      return res.status(400).json({ error: 'startDate and endDate required' });
+    }
+
+    const [goal, logs] = await Promise.all([
+      DietGoal.findOne({ where: { UserId: req.user.id } }),
+      MealLog.findAll({
+        where: { UserId: req.user.id, date: { [Op.between]: [startDate, endDate] } },
+        order: [['date', 'ASC'], ['createdAt', 'ASC']]
+      })
+    ]);
+
+    // Group logs by date
+    const byDate = {};
+    for (const log of logs) {
+      if (!byDate[log.date]) byDate[log.date] = [];
+      byDate[log.date].push(log);
+    }
+
+    res.json({ goal: goal || null, byDate });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to fetch diet summary' });
+  }
+});
+
+// GET /api/diet/water?date=YYYY-MM-DD - get water intake for a specific date
+app.get('/api/diet/water', auth, async (req, res) => {
+  try {
+    const { date } = req.query;
+    if (!date) return res.status(400).json({ error: 'Date is required' });
+
+    const log = await WaterLog.findOne({ where: { UserId: req.user.id, date } });
+    res.json({ date, amountMl: log ? log.amountMl : 0 });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to fetch water log' });
+  }
+});
+
+// POST /api/diet/water - log or adjust water intake
+app.post('/api/diet/water', auth, async (req, res) => {
+  try {
+    const { date, amountMl, delta } = req.body;
+    if (!date) return res.status(400).json({ error: 'Date is required' });
+
+    let [log, created] = await WaterLog.findOrCreate({
+      where: { UserId: req.user.id, date },
+      defaults: { UserId: req.user.id, date, amountMl: 0 }
+    });
+
+    let newAmount = log.amountMl;
+    if (delta !== undefined) {
+      newAmount = Math.max(0, Math.round(log.amountMl + parseFloat(delta)));
+    } else if (amountMl !== undefined) {
+      newAmount = Math.max(0, Math.round(parseFloat(amountMl)));
+    }
+
+    await log.update({ amountMl: newAmount });
+    res.json({ date, amountMl: log.amountMl });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to update water log' });
+  }
+});
+
+/* =========================================================================
    16. FALLBACK 404 & GLOBAL ERROR HANDLER
 ========================================================================= */
 
@@ -887,6 +1528,8 @@ app.use((err, req, res, next) => {
   console.error('Unhandled Exception:', err);
   res.status(500).json({ error: 'A secure server error occurred' });
 });
+
+
 
 /* =========================================================================
    17. SERVER INITIALIZATION
