@@ -9,6 +9,7 @@ import { fileURLToPath } from 'url';
 import { Sequelize, DataTypes, Op } from 'sequelize';
 import 'dotenv/config';
 import { sendOtpEmail, sendPasswordResetOtpEmail } from './emailService.js';
+import multer from 'multer';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -72,15 +73,133 @@ app.use(cors({
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-ota-secret', 'x-forwarded-proto']
 }));
 
 // Serve OTA Updates (Bundles & Manifests)
 const otaPublicDir = path.join(__dirname, 'public', 'ota');
-if (!fs.existsSync(otaPublicDir)) {
-  fs.mkdirSync(otaPublicDir, { recursive: true });
+const otaBundlesDir = path.join(otaPublicDir, 'bundles');
+if (!fs.existsSync(otaBundlesDir)) {
+  fs.mkdirSync(otaBundlesDir, { recursive: true });
 }
 app.use('/ota', express.static(otaPublicDir));
+
+// Configure multer storage for direct OTA uploads
+const otaStorage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, otaBundlesDir);
+  },
+  filename: function (req, file, cb) {
+    cb(null, file.originalname);
+  }
+});
+const otaUpload = multer({
+  storage: otaStorage,
+  limits: { fileSize: 100 * 1024 * 1024 } // 100MB
+});
+
+// Direct OTA Bundle Upload Endpoint (Called by publish-ota CLI script)
+app.post('/api/ota/upload-bundle', otaUpload.single('file'), async (req, res) => {
+  try {
+    const secret = req.headers['x-ota-secret'] || req.headers.authorization?.replace(/^Bearer\s+/i, '');
+    const validSecret = process.env.OTA_SECRET_KEY || 'discipline-tracker-ota-secret-key-2026';
+
+    if (!secret || secret !== validSecret) {
+      return res.status(401).json({
+        success: false,
+        message: 'Unauthorized: Invalid or missing OTA secret key.'
+      });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: 'No bundle file uploaded.'
+      });
+    }
+
+    const {
+      appId = 'com.discipline.tasktracker',
+      channel = '__base__',
+      runtime = '__default__',
+      version,
+      manifest: rawManifest,
+      forceImmediate
+    } = req.body;
+
+    let parsedManifest = {};
+    if (rawManifest) {
+      try {
+        parsedManifest = typeof rawManifest === 'string' ? JSON.parse(rawManifest) : rawManifest;
+      } catch (e) {
+        parsedManifest = {};
+      }
+    }
+
+    const relVersion = version || parsedManifest.version || '1.0.0';
+    const bundleFileName = req.file.filename;
+
+    const manifestDir = path.join(otaPublicDir, 'manifests', appId, channel, runtime);
+    fs.mkdirSync(manifestDir, { recursive: true });
+
+    let hostUrl = process.env.OTA_CDN_URL;
+    if (!hostUrl) {
+      const proto = (req.headers['x-forwarded-proto'] || req.protocol || 'https').replace(/:$/, '');
+      const host = req.get('host') || 'discipline-tracker-backend-xckgge-ddd24d-203-57-85-153.sslip.io';
+      hostUrl = `${proto}://${host}/ota`;
+    }
+
+    if (!hostUrl.includes('localhost') && !hostUrl.includes('127.0.0.1')) {
+      hostUrl = hostUrl.replace(/^http:\/\//i, 'https://');
+    }
+
+    let bundleUrl = (parsedManifest.url && typeof parsedManifest.url === 'string' && parsedManifest.url.startsWith('http'))
+      ? parsedManifest.url
+      : `${hostUrl}/bundles/${bundleFileName}`;
+
+    if (!bundleUrl.includes('localhost') && !bundleUrl.includes('127.0.0.1')) {
+      bundleUrl = bundleUrl.replace(/^http:\/\//i, 'https://');
+    }
+
+    const finalManifest = {
+      version: relVersion,
+      url: bundleUrl,
+      sha256: parsedManifest.sha256 || '',
+      size: req.file.size,
+      releaseId: parsedManifest.releaseId || `${appId}-${relVersion}-${Date.now().toString(36)}`,
+      strategy: 'zip',
+      forceImmediate: forceImmediate === 'true' || forceImmediate === true || parsedManifest.forceImmediate === true
+    };
+
+    // 1. Channel / runtime manifest
+    const manifestFilePath = path.join(manifestDir, 'manifest.json');
+    fs.writeFileSync(manifestFilePath, JSON.stringify(finalManifest, null, 2), 'utf-8');
+
+    // 2. Convenience top-level manifests
+    const rootManifestDir = path.join(otaPublicDir, 'manifests', appId);
+    fs.mkdirSync(rootManifestDir, { recursive: true });
+    fs.writeFileSync(path.join(rootManifestDir, 'manifest.json'), JSON.stringify(finalManifest, null, 2), 'utf-8');
+    fs.writeFileSync(path.join(otaPublicDir, 'manifest.json'), JSON.stringify(finalManifest, null, 2), 'utf-8');
+
+    console.log(`🚀 [OTA] Direct upload successful: bundle v${relVersion} for ${appId}`);
+
+    return res.json({
+      success: true,
+      message: `Bundle ${bundleFileName} uploaded and manifest v${relVersion} published directly to server.`,
+      version: relVersion,
+      bundleUrl: bundleUrl,
+      manifestUrl: `${hostUrl}/manifests/${appId}/${channel}/${runtime}/manifest.json`
+    });
+
+  } catch (error) {
+    console.error('OTA Upload Error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to upload OTA bundle',
+      error: error.message
+    });
+  }
+});
 
 // JWT Secret
 const JWT_SECRET = process.env.JWT_SECRET || 'b8d7a1e4c9f3028b5e6172a8c3d94e015f6a7b8c9d0e1f2a3b4c5d6e7f8091a2';
