@@ -313,7 +313,9 @@ const User = sequelize.define('User', {
   emoji: { type: DataTypes.STRING(20), defaultValue: '🌱' },
   hydrationEnabled: { type: DataTypes.BOOLEAN, defaultValue: true },
   hydrationSoundEnabled: { type: DataTypes.BOOLEAN, defaultValue: true },
-  hydrationIntervalMinutes: { type: DataTypes.INTEGER, defaultValue: 30 }
+  hydrationIntervalMinutes: { type: DataTypes.INTEGER, defaultValue: 30 },
+  premiumUntil: { type: DataTypes.DATE, allowNull: true },
+  lastAdWatchedAt: { type: DataTypes.DATE, allowNull: true }
 });
 
 const Task = sequelize.define('Task', {
@@ -1073,6 +1075,80 @@ app.put('/api/user/hydration', auth, async (req, res) => {
   } catch (err) {
     console.error('Update hydration error:', err);
     res.status(500).json({ error: 'Failed to update hydration settings' });
+  }
+});
+
+/* =========================================================================
+   11.1 PREMIUM & REWARDED AD ROUTES (1-Ad-Per-Day Access System)
+========================================================================= */
+
+app.get('/api/user/premium-status', auth, async (req, res) => {
+  try {
+    const user = await User.findByPk(req.user.id, {
+      attributes: ['id', 'name', 'email', 'premiumUntil', 'lastAdWatchedAt']
+    });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    const now = new Date();
+    const premiumUntil = user.premiumUntil ? new Date(user.premiumUntil) : null;
+    const isPremium = premiumUntil !== null && premiumUntil > now;
+    const remainingMs = isPremium ? Math.max(0, premiumUntil.getTime() - now.getTime()) : 0;
+    const remainingHours = Math.floor(remainingMs / (1000 * 60 * 60));
+    const remainingMinutes = Math.floor((remainingMs % (1000 * 60 * 60)) / (1000 * 60));
+
+    res.json({
+      success: true,
+      isPremium,
+      premiumUntil: premiumUntil ? premiumUntil.toISOString() : null,
+      lastAdWatchedAt: user.lastAdWatchedAt ? user.lastAdWatchedAt.toISOString() : null,
+      remainingHours,
+      remainingMinutes,
+      remainingFormatted: isPremium ? `${remainingHours}h ${remainingMinutes}m` : 'Expired'
+    });
+  } catch (err) {
+    console.error('Get premium status error:', err);
+    res.status(500).json({ error: 'Failed to retrieve premium status' });
+  }
+});
+
+app.post('/api/user/claim-ad-reward', auth, async (req, res) => {
+  try {
+    const user = await User.findByPk(req.user.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    const now = new Date();
+    const oneDayMs = 24 * 60 * 60 * 1000;
+
+    let baseTime = now;
+    if (user.premiumUntil) {
+      const currentExpiry = new Date(user.premiumUntil);
+      if (currentExpiry > now) {
+        baseTime = currentExpiry;
+      }
+    }
+
+    const newExpiry = new Date(baseTime.getTime() + oneDayMs);
+    user.premiumUntil = newExpiry;
+    user.lastAdWatchedAt = now;
+    await user.save();
+
+    const remainingMs = Math.max(0, newExpiry.getTime() - now.getTime());
+    const remainingHours = Math.floor(remainingMs / (1000 * 60 * 60));
+    const remainingMinutes = Math.floor((remainingMs % (1000 * 60 * 60)) / (1000 * 60));
+
+    res.json({
+      success: true,
+      message: '1-Day Premium access unlocked successfully! 🎉',
+      isPremium: true,
+      premiumUntil: newExpiry.toISOString(),
+      lastAdWatchedAt: now.toISOString(),
+      remainingHours,
+      remainingMinutes,
+      remainingFormatted: `${remainingHours}h ${remainingMinutes}m`
+    });
+  } catch (err) {
+    console.error('Claim ad reward error:', err);
+    res.status(500).json({ error: 'Failed to claim ad reward' });
   }
 });
 
