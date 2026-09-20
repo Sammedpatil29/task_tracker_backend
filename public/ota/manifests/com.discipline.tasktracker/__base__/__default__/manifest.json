@@ -1,0 +1,9 @@
+{
+  "version": "0.0.5",
+  "url": "https://discipline-tracker-backend-xckgge-ddd24d-203-57-85-153.sslip.io/ota/bundles/discipline-tracker-bundle-0.0.5.zip",
+  "sha256": "77b08be1bcb79543c3c3f32a73280bb56da99a87623a2f8629e96b54e79ef961",
+  "size": 912742,
+  "releaseId": "dt-rel-0.0.5-mu9csoce",
+  "strategy": "zip",
+  "forceImmediate": false
+}

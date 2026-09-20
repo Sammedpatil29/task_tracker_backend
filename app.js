@@ -3,9 +3,15 @@ import cors from 'cors';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { Sequelize, DataTypes, Op } from 'sequelize';
 import 'dotenv/config';
 import { sendOtpEmail, sendPasswordResetOtpEmail } from './emailService.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 
@@ -32,21 +38,49 @@ app.use(express.json({ limit: '25kb' }));
 app.use(express.urlencoded({ extended: false, limit: '25kb' }));
 
 // CORS Whitelisting
-const rawOrigins = process.env.ALLOWED_ORIGINS || 'http://localhost:4200,http://127.0.0.1:4200';
-const allowedOrigins = rawOrigins.split(',').map(o => o.trim()).filter(Boolean);
+const defaultMobileOrigins = [
+  'https://localhost',
+  'http://localhost',
+  'capacitor://localhost',
+  'ionic://localhost',
+  'http://localhost:4200',
+  'http://127.0.0.1:4200',
+  'http://localhost:8100',
+  'http://127.0.0.1:8100'
+];
+
+const rawOrigins = process.env.ALLOWED_ORIGINS || '';
+const customOrigins = rawOrigins.split(',').map(o => o.trim()).filter(Boolean);
+const allowedOrigins = Array.from(new Set([...defaultMobileOrigins, ...customOrigins]));
 
 app.use(cors({
   origin: (origin, callback) => {
-    // Allow non-browser requests (e.g. mobile apps/curl in dev) or matched origins
-    if (!origin || allowedOrigins.includes(origin)) {
+    // Allow non-browser requests (e.g. mobile apps native HTTP/curl/Postman) or matched origins
+    if (!origin) {
       return callback(null, true);
     }
-    return callback(new Error('CORS Policy: Request origin is blocked by security rules'));
+    // Allow whitelisted origins, mobile app schemes (capacitor://, ionic://), and localhost/127.0.0.1 on any port
+    if (
+      allowedOrigins.includes(origin) ||
+      origin.startsWith('capacitor://') ||
+      origin.startsWith('ionic://') ||
+      /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)
+    ) {
+      return callback(null, true);
+    }
+    return callback(new Error(`CORS Policy: Request origin '${origin}' is blocked by security rules`));
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
+
+// Serve OTA Updates (Bundles & Manifests)
+const otaPublicDir = path.join(__dirname, 'public', 'ota');
+if (!fs.existsSync(otaPublicDir)) {
+  fs.mkdirSync(otaPublicDir, { recursive: true });
+}
+app.use('/ota', express.static(otaPublicDir));
 
 // JWT Secret
 const JWT_SECRET = process.env.JWT_SECRET || 'b8d7a1e4c9f3028b5e6172a8c3d94e015f6a7b8c9d0e1f2a3b4c5d6e7f8091a2';
