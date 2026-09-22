@@ -1082,7 +1082,7 @@ app.put('/api/user/hydration', auth, async (req, res) => {
    11.1 PREMIUM & REWARDED AD ROUTES (1-Ad-Per-Day Access System)
 ========================================================================= */
 
-app.get('/api/user/premium-status', auth, async (req, res) => {
+app.get(['/api/user/premium-status', '/user/premium-status'], auth, async (req, res) => {
   try {
     const user = await User.findByPk(req.user.id, {
       attributes: ['id', 'name', 'email', 'premiumUntil', 'lastAdWatchedAt']
@@ -1111,7 +1111,7 @@ app.get('/api/user/premium-status', auth, async (req, res) => {
   }
 });
 
-app.post('/api/user/claim-ad-reward', auth, async (req, res) => {
+app.post(['/api/user/claim-ad-reward', '/user/claim-ad-reward'], auth, async (req, res) => {
   try {
     const user = await User.findByPk(req.user.id);
     if (!user) return res.status(404).json({ error: 'User not found' });
@@ -1742,6 +1742,103 @@ app.post('/api/diet/water', auth, async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to update water log' });
+  }
+});
+
+// POST /api/diet/ai-nutrition - AI nutrition & calorie breakdown estimator
+app.post('/api/diet/ai-nutrition', auth, async (req, res) => {
+  try {
+    const { foodQuery, notes } = req.body;
+    if (!foodQuery || typeof foodQuery !== 'string' || !foodQuery.trim()) {
+      return res.status(400).json({ error: 'Food item description is required.' });
+    }
+
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey || apiKey === 'your_openai_api_key_here' || apiKey.trim() === '') {
+      return res.status(503).json({
+        error: 'OpenAI API key is not configured. Please set OPENAI_API_KEY in the backend .env file.'
+      });
+    }
+
+    const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+    const combinedQuery = notes && notes.trim()
+      ? `${foodQuery.trim()} (Details/Notes: ${notes.trim()})`
+      : foodQuery.trim();
+
+    const systemPrompt = `You are a certified nutritionist and nutritional database engine.
+Given a food item or meal description, calculate the most accurate, realistic estimated nutritional values.
+Respond STRICTLY with a valid JSON object matching this schema:
+{
+  "foodName": "A concise normalized name of the food",
+  "portion": "Estimated standard portion or quantity interpreted (e.g. 1 medium apple (~180g), 1 cup cooked (~200g))",
+  "calories": number (total kcal as a non-negative integer),
+  "proteinG": number (total protein in grams, rounded to 1 decimal place or integer),
+  "carbsG": number (total carbohydrates in grams, rounded to 1 decimal place or integer),
+  "fatG": number (total fat in grams, rounded to 1 decimal place or integer),
+  "fiberG": number (total dietary fiber in grams, rounded to 1 decimal place or integer),
+  "confidence": "high" | "medium" | "low",
+  "summary": "Brief 1-sentence explanation of the portion and breakdown"
+}
+Ensure macronutrient calories roughly correlate with total calories (4 kcal/g protein, 4 kcal/g carb, 9 kcal/g fat).
+Do NOT wrap in markdown quotes or extra text. Only return the raw JSON.`;
+
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey.trim()}`
+      },
+      body: JSON.stringify({
+        model: model,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: `Analyze this food item and return its nutrition breakdown: "${combinedQuery}"` }
+        ],
+        temperature: 0.2,
+        max_tokens: 350
+      })
+    });
+
+    if (!response.ok) {
+      const errorBody = await response.text();
+      console.error('OpenAI API Error:', response.status, errorBody);
+      let message = 'Failed to fetch nutrition breakdown from OpenAI.';
+      try {
+        const parsedErr = JSON.parse(errorBody);
+        if (parsedErr?.error?.message) {
+          message = parsedErr.error.message;
+        }
+      } catch (_) {}
+      return res.status(response.status).json({ error: message });
+    }
+
+    const data = await response.json();
+    const content = data.choices?.[0]?.message?.content;
+    if (!content) {
+      return res.status(502).json({ error: 'Empty response received from AI model.' });
+    }
+
+    const parsed = JSON.parse(content);
+
+    // Validate and sanitize numerical fields
+    const sanitized = {
+      success: true,
+      foodName: String(parsed.foodName || foodQuery.trim()),
+      portion: String(parsed.portion || '1 standard serving'),
+      calories: Math.max(0, Math.round(Number(parsed.calories) || 0)),
+      proteinG: Math.max(0, Math.round((Number(parsed.proteinG) || 0) * 10) / 10),
+      carbsG: Math.max(0, Math.round((Number(parsed.carbsG) || 0) * 10) / 10),
+      fatG: Math.max(0, Math.round((Number(parsed.fatG) || 0) * 10) / 10),
+      fiberG: Math.max(0, Math.round((Number(parsed.fiberG) || 0) * 10) / 10),
+      confidence: parsed.confidence || 'medium',
+      summary: parsed.summary || ''
+    };
+
+    res.json(sanitized);
+  } catch (err) {
+    console.error('AI Nutrition Estimation Error:', err);
+    res.status(500).json({ error: 'Server error while calculating AI nutrition breakdown.' });
   }
 });
 
