@@ -1596,6 +1596,54 @@ app.get('/api/diet/logs', auth, async (req, res) => {
   }
 });
 
+// GET /api/diet/meals/suggestions?q=... - get unique previous meals logged by this user for autocomplete suggestions
+app.get('/api/diet/meals/suggestions', auth, async (req, res) => {
+  try {
+    const { q } = req.query;
+    let whereClause = { UserId: req.user.id };
+
+    if (q && typeof q === 'string' && q.trim()) {
+      whereClause.name = { [Op.iLike]: `%${q.trim()}%` };
+    }
+
+    // Fetch the user's past meals, ordered by most recent first
+    const logs = await MealLog.findAll({
+      where: whereClause,
+      order: [['createdAt', 'DESC']],
+      limit: 120
+    });
+
+    // Deduplicate by normalized lowercase meal name to return the most recently used version of each meal
+    const seenNames = new Set();
+    const suggestions = [];
+
+    for (const log of logs) {
+      const normalized = (log.name || '').trim().toLowerCase();
+      if (normalized && !seenNames.has(normalized)) {
+        seenNames.add(normalized);
+        suggestions.push({
+          id: log.id,
+          name: log.name,
+          mealType: log.mealType,
+          calories: log.calories,
+          proteinG: log.proteinG,
+          carbsG: log.carbsG,
+          fatG: log.fatG,
+          fiberG: log.fiberG,
+          notes: log.notes,
+          lastLoggedDate: log.date
+        });
+        if (suggestions.length >= 25) break;
+      }
+    }
+
+    res.json(suggestions);
+  } catch (err) {
+    console.error('Error fetching meal suggestions:', err);
+    res.status(500).json({ error: 'Failed to fetch meal suggestions' });
+  }
+});
+
 // POST /api/diet/logs - add a meal log entry
 app.post('/api/diet/logs', auth, async (req, res) => {
   try {
