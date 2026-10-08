@@ -1,9 +1,9 @@
 {
-  "version": "0.0.20",
-  "url": "https://discipline-tracker-backend-xckgge-ddd24d-203-57-85-153.sslip.io/ota/bundles/discipline-tracker-bundle-0.0.20.zip",
-  "sha256": "2c53281733a4c9897ee435cc5fcf7e682dcea2a222a194b025f6ce75af6d23a6",
-  "size": 978801,
-  "releaseId": "dt-rel-0.0.20-muvk7xed",
+  "version": "0.0.21",
+  "url": "https://discipline-tracker-backend-xckgge-ddd24d-203-57-85-153.sslip.io/ota/bundles/discipline-tracker-bundle-0.0.21.zip",
+  "sha256": "02f710859ff9e74ad4430e310384f0662a92db7eb543317fa357e0f587ee5ec3",
+  "size": 978544,
+  "releaseId": "dt-rel-0.0.21-muyz2b99",
   "strategy": "zip",
   "forceImmediate": false
 }
