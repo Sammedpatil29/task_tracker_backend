@@ -84,6 +84,12 @@ if (!fs.existsSync(otaBundlesDir)) {
 }
 app.use('/ota', express.static(otaPublicDir));
 
+// Serve app-ads.txt for Google AdMob app verification
+app.get('/app-ads.txt', (req, res) => {
+  res.type('text/plain');
+  res.send('google.com, pub-3473476447894688, DIRECT, f08c47fec0942fa0\n');
+});
+
 // Configure multer storage for direct OTA uploads
 const otaStorage = multer.diskStorage({
   destination: function (req, file, cb) {
