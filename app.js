@@ -85,9 +85,14 @@ if (!fs.existsSync(otaBundlesDir)) {
 app.use('/ota', express.static(otaPublicDir));
 
 // Serve app-ads.txt for Google AdMob app verification
-app.get('/app-ads.txt', (req, res) => {
+app.get(['/app-ads.txt', '/app-ads.txt/app-ads.txt'], (req, res) => {
   res.type('text/plain');
   res.send('google.com, pub-3473476447894688, DIRECT, f08c47fec0942fa0\n');
+});
+
+// Root route
+app.get('/', (req, res) => {
+  res.send('Discipline Tracker API & Services Running');
 });
 
 // Configure multer storage for direct OTA uploads
